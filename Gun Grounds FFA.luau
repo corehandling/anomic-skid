@@ -30,7 +30,7 @@ function Bot.Hit(Info)
             CFrame.new(Info.Position, Info.Position + Info.Normal),
             Bot.Gun.Configuration:FindFirstChild("HitEffect") and Bot.Gun.Configuration.HitEffect.Value or "Gib_T"
         )
-        if Bot.Gun:FindFirstChild("Muz") and 4 < (Info.Position - Bot.Gun.Muz.LOC.WorldPosition) then
+        if Bot.Gun:FindFirstChild("Muz") and 4 < (Info.Position - Bot.Gun.Muz.LOC.WorldPosition).Magnitude then
             ReplicatedStorage.Remotes.PlayerReQuests.ProjectileRender:FireServer(
                 tick(),
                 Bot.Character,
@@ -53,7 +53,8 @@ function Bot.Weapon(Tool)
         if LocalPlayer.PlayerGui:FindFirstChild("GunOverlay") then
             AmmoCounter:Disconnect()
             AmmoCounter = LocalPlayer.PlayerGui.GunOverlay.ScreenSize.AmmoFrame.BarCon.TextLabel.Changed:Connect(function()
-                Bot.Ammo = LocalPlayer.PlayerGui.GunOverlay.ScreenSize.AmmoFrame.BarCon.TextLabel.Text
+                Bot.LastShot = tick()
+                Bot.Ammo = tonumber(LocalPlayer.PlayerGui.GunOverlay.ScreenSize.AmmoFrame.BarCon.TextLabel.Text)
             end)
         end
     end)
@@ -67,18 +68,18 @@ function Bot.Weapon(Tool)
 end
 
 function Bot.Scan()
-    if not Bot.Gun or tick() - Bot.LastShot < (Bot.Gun.Configuration:FindFirstChild("FireRate") and Bot.Gun.Configuration.FireRate.Value or 0.1) then return end
+    if not Bot.Gun or Bot.Ammo <= 0 or tick() - Bot.LastShot < (Bot.Gun.Configuration:FindFirstChild("FireRate") and Bot.Gun.Configuration.FireRate.Value or 0.1) then return end
     for _, Player in next, Players:GetPlayers() do
         if Player == LocalPlayer then continue end
         local Head = Player.Character and Player.Character:FindFirstChild("Head")
         if not Head then continue end
         local Result = Workspace:Raycast(Workspace.CurrentCamera.CFrame.Position, (Head.Position - Workspace.CurrentCamera.CFrame.Position).Unit * (Head.Position - Workspace.CurrentCamera.CFrame.Position).Magnitude, Bot.Params)
         if Result and Result.Instance:IsDescendantOf(Player.Character) then
-            Bot.Ammo -= 1
+            LocalPlayer.PlayerGui.GunOverlay.ScreenSize.AmmoFrame.BarCon.TextLabel.Text = tostring(tonumber(LocalPlayer.PlayerGui.GunOverlay.ScreenSize.AmmoFrame.BarCon.TextLabel.Text) - 1)
             Bot.Hit({
                 Position = Result.Position;
                 Instance = Head;
-                Normal = Bot.Normal;
+                Normal = Result.Normal;
             })
             return
         end
