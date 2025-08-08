@@ -1,6 +1,9 @@
 -- defensive peek by listening humanoid state jumping, after jump over then set pos to floor
 -- store and fix pos if raycast from pos hit target, delay ping * 2
 -- if player shot by ragebot, create context, dont shoot player until health changes, timeout 2 secs
+
+if _G.hack then return end _G.hack = true
+
 local players = game:GetService("Players")
 local replicated_storage = game:GetService("ReplicatedStorage")
 local uis = game:GetService("UserInputService")
@@ -14,11 +17,12 @@ local rage_bot = {}
 rage_bot.raycast_params = RaycastParams.new()
 rage_bot.raycast_params.FilterType = Enum.RaycastFilterType.Exclude
 rage_bot.raycast_params.FilterDescendantsInstances = {workspace.RayIgnore}
-rage_bot.body_parts = {"Head"}
+rage_bot.body_parts = {"Head", "UpperTorso"}
 rage_bot.position_logs = {}
-rage_bot.player_ctxs = {} -- dict, boolean flag
+rage_bot.player_flags = {}
+rage_bot.armor_info = {}
+rage_bot.defenses = {}
 
--- server-side check
 function rage_bot.integrity()
     local v126 = string.len(rage_bot.gun.Name)
     local v127 = rage_bot.gun_settings
@@ -45,6 +49,7 @@ function rage_bot.scan(player)
         local first_result = rage_bot.raycast(origin, (target - origin).Unit * magnitude)
         if first_result and first_result.Instance:IsDescendantOf(player.Character) then
             return {
+                character = player.Character;
                 position = first_result.Position;
                 instance = target;
                 normal = first_result.Normal;
@@ -56,6 +61,7 @@ function rage_bot.scan(player)
             local result = rage_bot.raycast(origin, delta.Unit * magnitude)
             if result and result.Instance:IsDescendantOf(player.Character) then
                 return {
+                    character = player.Character;
                     position_ctx = position_ctx;
                     position = result.Position;
                     instance = target;
@@ -119,11 +125,11 @@ function rage_bot.think()
     local targets = {}
     for _, player in next, players:GetPlayers() do
         if player == local_player then continue end
-        if rage_bot.player_ctxs[player] then continue end
+        if rage_bot.player_flags[player] then continue end
         local priority = player.Character and not player.Character:FindFirstChild("ForceField") and player.Character:FindFirstChild("Head")
-        if not priority or (priority.Position - origin).Magnitude > rage_bot.gun_settings.BulletSpeed then continue end
-        local Humanoid = player.Character:FindFirstChild("Humanoid")
-        if not Humanoid or Humanoid.Health < 1 then continue end
+        if not priority or (priority.Position - origin).Magnitude > rage_bot.gun_settings.Range then continue end
+        local humanoid = player.Character:FindFirstChild("Humanoid")
+        if not humanoid or humanoid.Health < 1 then continue end
         local display = priority:FindFirstChild("PlayerDisplay")
         if not display or display.Wanted.Text ~= "Wanted" then continue end
         table.insert(targets, player)
@@ -141,24 +147,20 @@ function rage_bot.think()
                 rage_bot.character.HumanoidRootPart.Position = rage_bot.target_ctx.position_ctx.primary_origin
                 table.clear(rage_bot.position_logs)
             end
-            rage_bot.player_ctxs[target] = true
-            local humanoid: Humanoid = target.Character:FindFirstChild("Humanoid")
-            local listen_health = humanoid.HealthChanged:Once(function()
-                rage_bot.player_ctxs[target] = false
+            rage_bot.player_flags[target] = true
+            local humanoid = target.Character:FindFirstChild("Humanoid")
+            local listen_death = humanoid.Died:Once(function()
+                rage_bot.player_flags[target] = false
             end)
             task.delay(2, function()
-                listen_health:Disconnect()
-                rage_bot.player_ctxs[target] = false -- idk if theres a race condition here
+                listen_death:Disconnect()
+                rage_bot.player_flags[target] = false
             end)
             rage_bot.fire_shot()
             for i = 1, rage_bot.bullets_needed() do
-                if rage_bot.gun_settings.Firemode == "Shot" or rage_bot.gun_settings.Firemode == "Sniper" then
-                    if rage_bot.gun_settings.Firemode == "Sniper" then
+                if rage_bot.gun_settings.Firemode == "Shot" then
+                    for _ = 1, 6 do
                         rage_bot.replicate_hit(rage_bot.target_ctx.Instance, rage_bot.target_ctx.Position, rage_bot.target_ctx.Normal)
-                    else
-                        for _ = 1, 6 do
-                            rage_bot.replicate_hit(rage_bot.target_ctx.Instance, rage_bot.target_ctx.Position, rage_bot.target_ctx.Normal)
-                        end
                     end
                 else
                     rage_bot.replicate_hit(rage_bot.target_ctx.Instance, rage_bot.target_ctx.Position, rage_bot.target_ctx.Normal)
@@ -169,7 +171,6 @@ function rage_bot.think()
     end
 end
 
--- NOTE: if fixed pos then call table.clear(rage_bot.position_logs)
 function rage_bot.update_logs()
     for i = 1, #rage_bot.position_logs do
         if rage_bot.position_logs[i].ts + ping:GetValue() / 1000 < tick() then
@@ -217,12 +218,31 @@ function rage_bot.raycast(from, to, depth)
     return result
 end
 
--- pls no waste boolets
-function rage_bot.bullets_needed()
-    return math.min(math.ceil(100/rage_bot.gun_settings.Damage), rage_bot.gun.Handle.Mag.Value)
+for tool, info  in weapon_list do
+    if info.DataType == "Armor" then
+        table.insert(rage_bot.defenses, tool)
+        rage_bot.armor_info[tool] = {
+            damage_reduction = info.DamageReduction / 100;
+            protected = table.clone(info.ProtectedParts)
+        }
+    end
 end
 
-function rage_bot.defensive_peek(old, _)
+function rage_bot.bullets_needed()
+    local damage = rage_bot.gun_settings.Damage
+    for _, obj in next, rage_bot.target_ctx.character:GetChildren() do
+        if obj:IsA("Accessory") and table.find(rage_bot.defenses, obj.Name) then
+            local armor_info = rage_bot.armor_info[obj.Name]
+            if table.find(armor_info.protected, rage_bot.target_ctx.instance.Name) then
+                damage *= armor_info.damage_reduction
+                break -- Break because there is not multiple equippable armor, yet
+            end
+        end
+    end
+    return math.min(math.ceil(100/damage), rage_bot.gun.Handle.Mag.Value)
+end
+
+function rage_bot.defensive(old, new)
     if old == Enum.HumanoidStateType.Jumping then
         local hrp = rage_bot.character.HumanoidRootPart
         local origin = hrp.Position
@@ -230,21 +250,32 @@ function rage_bot.defensive_peek(old, _)
         if result then
             hrp.Position = Vector3.new(origin.X, result.Position.Y + hrp.Size.Y / 2, origin.Z)
         end
+    elseif new == Enum.HumanoidStateType.FallingDown then
+        task.wait()
+        rage_bot.character.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
     end
 end
 
 function rage_bot.weapon(tool)
     local main_gun_script = tool:FindFirstChild("MainGunScript")
     if not main_gun_script then return end
+    rage_bot.character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
     rage_bot.gun = tool
     rage_bot.gun_settings = weapon_list[tool.Name]
-    rage_bot.gun_settings.BulletSpeed = rage_bot.gun_settings.BulletSpeed or 700
+    uis.MouseBehavior = Enum.MouseBehavior.LockCenter
+    local lock = uis:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
+        if uis.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+            uis.MouseBehavior = Enum.MouseBehavior.LockCenter
+        end
+    end)
     local update_logs = run_service.PreRender:Connect(rage_bot.update_logs)
     local think = run_service.Stepped:Connect(rage_bot.think)
-    local defensive = rage_bot.character.Humanoid.StateChanged:Connect(rage_bot.defensive_peek)
+    local defensive = rage_bot.character.Humanoid.StateChanged:Connect(rage_bot.defensive)
     local unused; unused = tool.AncestryChanged:Connect(function(_, parent)
         if parent ~= rage_bot.character or not rage_bot.character then
+            rage_bot.character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, true)
             rage_bot.gun = nil
+            lock:Disconnect()
             think:Disconnect()
             defensive:Disconnect()
             update_logs:Disconnect()
